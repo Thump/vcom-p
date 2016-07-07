@@ -1,0 +1,22 @@
+
+<video name="testvideo" dir="test-out" size="320x240" color="black" >
+
+  <sequence name="seq1" >
+
+    <source
+      dir="test/seq2"
+      template=".*.ppm$"
+      start="0"
+      end="10"
+      step="1"
+    />
+
+    <target start="0" length="10" />
+    <position start="-10x-10" xstep="2" ystep="2" xstepinc="0.5" end="10x10" />
+    <rotation start="0" end="10" step="0.5" />
+    <opacity start="10" end="100" step="2" />
+    <zoom start="10" end="100" step="14" />
+    <size start="10x10" end="100x100" xstep="5" ystep="1"  />
+  </sequence>
+
+</video>

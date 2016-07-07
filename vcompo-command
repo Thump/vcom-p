@@ -1,0 +1,209 @@
+#!/usr/bin/perl
+
+use Socket;
+
+
+sub usage
+{
+  local($cmd)=$0;
+  $cmd =~ s#^.*/(.*)$#$1#;
+  print "$cmd [ -f <fnum>:[<fnum>] ] [ <hostname> ... ]\n";
+  print "where:\n";
+  print "  <hostname> : the hosts to spawn the commands on\n";
+  print "  -f         : specifies a range of frames to render\n";
+  print "\n";
+  print "$cmd will read a vcompo command file from stdin and execute\n";
+  print "those commands across the specified hosts.  If no hosts are\n";
+  print "specified on the command line, they will be read from the\n";
+  print "VCOMPO_HOSTS environment variable.\n";
+  print "\n";
+  print "If a frame range is specified, only the frames inclusively within\n";
+  print "that frame range will be generated.\n";
+  print "\n";
+}
+
+
+# check for the help argument
+if ( $ARGV[0] eq "-h" )
+{
+  usage();
+  exit;
+}
+
+
+# check for the frame range argument
+$fstart=0;
+$fend=99999999999999;
+if ( $ARGV[0] eq "-f" )
+{
+  # turn on the framerules flag, to catch further rules
+  shift;
+
+  if ( $ARGV[0] !~ /^\d+:\d*$/ )
+  {
+    print "must specify frame range with -f option\n";
+    print "\n";
+    usage();
+    exit 1;
+  }
+
+  # split the frames into leading and trailing
+  ($fstart,$fend) = split /:/,$ARGV[0];
+  $fend=99999999 if ( $fend eq "" );
+
+  # check the frames are ordered correctly
+  if ( $fstart > $fend )
+  {
+    print "$fstart:$fend - first frame is greater than second\n";
+    print "\n";
+    usage();
+    exit 1;
+  }
+
+  shift;
+}
+
+
+# check the remaining arguments
+if ( $#ARGV < 0 )
+{
+  if ( ! defined($ENV{VCOMPO_HOSTS}) )
+  {
+    print "must specify hosts via command line or in VCOMPO_HOSTS\n";
+    print "\n";
+    usage();
+    exit 1;
+  }
+  else
+  {
+    @hosts=split ' ',$ENV{VCOMPO_HOSTS};
+  }
+}
+else
+{
+  # consider everything else a host
+  @hosts=@ARGV;
+}
+
+# print the processed arguments
+print "hosts are: @hosts\n";
+print "frame range is $fstart to $fend\n" if ( defined($fstart) );
+
+$port="1234";
+
+
+# loop across each host, connecting to it
+foreach $host (@hosts)
+{
+  print "connecting to $host\n";
+  $paddr=sockaddr_in($port,inet_aton($host)) ||
+    die "sockaddr_in error on $host: $!\n";
+  socket($host,PF_INET,SOCK_STREAM,getprotobyname('tcp')) ||
+    die "socket error on $host: $!";
+  connect($host,$paddr) || die "connect error on $host: $!";
+  $old=select($host); $|=1; select($old);
+
+  # tell the client what our directory should be
+  $pwd=`pwd`;
+  print "sending working directory\n";
+  print $host "cd $pwd\n";
+}
+
+# set up the select readable vector
+$rin='';
+foreach $host (@hosts)
+{
+  vec($rin,fileno($host), 1) = 1;
+}
+
+
+# loop forever, sending each host a frame to do when it sends us stuff
+$|=1;
+print "\n";
+$start=time();
+while ( 1 )
+{
+  ($nfound,$tleft)=select($rout=$rin,undef,undef,undef);
+
+  print "\r";
+  foreach $host (@hosts)
+  {
+    print " $host: $stats{$host} ";
+  }
+  print " --  $stats{frames} frames";
+  $dur=time()-$start;
+  if ( $dur != 0 )
+  {
+    $fps=sprintf("%.2f",$stats{frames} / $dur);
+    print ", $fps fps  ";
+  }
+
+  foreach $host (@hosts)
+  {
+    if ( vec($rout,fileno($host),1) )
+    {
+      $reply=<$host>;
+
+      if ( length($reply) == 0 )
+      {
+        print "\n\n$host disconnected, removing from list\n";
+        vec($rin,fileno($host), 1) = 0;
+      }
+
+      sendcmds($host) if ( $reply =~ /^ready$/ );
+    }
+  }
+}
+
+
+# this routine sends a frame's worth of commands to the specified client
+sub sendcmds
+{
+  $host=$_[0];
+
+  undef(@localcmds);
+  $done=0;
+  $collect=0;
+  while ( !$done )
+  {
+    $cmd=<>;
+    if ( !$cmd )
+    { quit(); }
+    if ( $cmd =~ /^# frame \d+ end/ )
+    { $done=1; }
+    elsif ( $cmd =~ /^# frame \d+ start/ )
+    {
+      ($frame=$cmd) =~ s/^# frame (\d+) start.*$/\1/;
+      if ( $frame >= $fstart && $frame <= $fend )
+      {
+        $stats{$host}++;
+        $stats{frames}++;
+        $collect=1;
+      }
+    }
+    elsif ( $collect )
+    {
+      push @localcmds,$cmd;
+    }
+  }
+
+  print $host "@localcmds";
+  print $host "go\n";
+  quit() if ( ! $cmd );
+}
+
+
+sub quit
+{
+  print "\n";
+  print "\n";
+  print "commands completed, exiting\n";
+
+  print "closing hosts\n";
+  foreach $host (@hosts)
+  {
+    close $host;
+  }
+
+  exit;
+}

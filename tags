@@ -1,0 +1,29 @@
+!_TAG_FILE_FORMAT	2	/extended format; --format=1 will not append ;" to lines/
+!_TAG_FILE_SORTED	1	/0=unsorted, 1=sorted, 2=foldcase/
+!_TAG_PROGRAM_AUTHOR	Darren Hiebert	/dhiebert@users.sourceforge.net/
+!_TAG_PROGRAM_NAME	Exuberant Ctags	//
+!_TAG_PROGRAM_URL	http://ctags.sourceforge.net	/official site/
+!_TAG_PROGRAM_VERSION	5.5.2	//
+checkOpacity	vcompo	/^sub checkOpacity$/;"	s
+checkPosition	vcompo	/^sub checkPosition$/;"	s
+checkRotation	vcompo	/^sub checkRotation$/;"	s
+checkSequence	vcompo	/^sub checkSequence$/;"	s
+checkSequences	vcompo	/^sub checkSequences$/;"	s
+checkSize	vcompo	/^sub checkSize$/;"	s
+checkSource	vcompo	/^sub checkSource$/;"	s
+checkTarget	vcompo	/^sub checkTarget$/;"	s
+checkVariables	vcompo	/^sub checkVariables$/;"	s
+checkVideo	vcompo	/^sub checkVideo$/;"	s
+checkZoom	vcompo	/^sub checkZoom$/;"	s
+fileList	vcompo	/^sub fileList$/;"	s
+generateCommands	vcompo	/^sub generateCommands$/;"	s
+generateSequences	vcompo	/^sub generateSequences$/;"	s
+linear	vcompo	/^sub linear$/;"	s
+prepareSequences	vcompo	/^sub prepareSequences$/;"	s
+printSequence	vcompo	/^sub printSequence$/;"	s
+printSequences	vcompo	/^sub printSequences()$/;"	s
+printVideo	vcompo	/^sub printVideo$/;"	s
+quit	vcompo-command	/^sub quit$/;"	s
+sendcmds	vcompo-command	/^sub sendcmds$/;"	s
+stats	vcompo-command	/^sub stats$/;"	s
+varSub	vcompo	/^sub varSub$/;"	s

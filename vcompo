@@ -1,0 +1,1333 @@
+#!/usr/bin/perl
+
+
+###########################################################################
+# some basic modules
+
+use XML::Simple;
+use Data::Dumper;
+
+
+###########################################################################
+# some global variables
+
+# program version
+local $version="0.1";
+
+
+###########################################################################
+# program main line
+
+# check we got the right command line arguments
+if ( $#ARGV != 0 )
+{
+  print STDERR "error in arguments\n";
+  print STDERR "\n";
+  print STDERR "$0 <xmlfile1>\n";
+  print STDERR "\n";
+  exit 1;
+}
+
+
+# a short title bar
+print "\n";
+print "vcompo: a programmatic video compositing tool\n";
+print "  version $version\n";
+print "\n";
+
+
+# parse the command line arguments
+$xml=$ARGV[0];
+
+# read the XML video file
+print "reading $xml\n\n";
+%video=%{XMLin($xml,keeproot=>0,keyattr=>'',
+  forcearray=>["variable","sequence"])};
+
+
+checkVariables();
+checkVideo();
+checkSequences();
+prepareSequences();
+
+@seqs=keys %sequences;
+if ( $#seqs < 0 )
+{
+  print STDERR "no sequences with files!\n";
+  print STDERR "\n";
+  exit;
+}
+#printSequences();
+  
+generateSequences();
+generateCommands();
+
+print "complete\n";
+
+
+###########################################################################
+# this routine pre-processes the sequences, substituting variables,
+# interpolating pos/rot/opa, etc
+
+sub prepareSequences
+{
+  print "preparing sequences\n";
+
+  local ($i);
+
+  foreach $name (@sequences)
+  {
+
+    @{$sequences{$name}{files}}=
+      fileList($sequences{$name}{source}{dir},
+               $sequences{$name}{source}{template});
+
+    if ( $#{$sequences{$name}{files}} < 0 )
+    {
+      print "\n";
+      print "unable to find matching files for sequence $name: skipping\n";
+      delete($sequences{$name});
+      next;
+    }
+
+    # set the source end, if not already set
+    $sequences{$name}{source}{end}= $#{$sequences{$name}{files}}
+      if ( !defined($sequences{$name}{source}{end}) );
+
+    # reset the source end, if the specified end is greater than the actual
+    $sequences{$name}{source}{end}= $#{$sequences{$name}{files}}
+      if ( $sequences{$name}{source}{end} > $#{$sequences{$name}{files}} );
+
+    # set the numframes to the number of to-be-inserted frames
+    $sequences{$name}{numframes}=0;
+    $i=$sequences{$name}{target}{start};
+    while ( $i <= $sequences{$name}{target}{end} )
+    {
+      $i+=$sequences{$name}{target}{step};
+      $sequences{$name}{numframes}++;
+    }
+
+    # compute the position values array
+    @{$sequences{$name}{position}{xvalues}}=
+      linear($sequences{$name}{position}{xstart},
+             $sequences{$name}{position}{xend},
+             $sequences{$name}{position}{xstep},
+             $sequences{$name}{position}{xstepinc},
+             $sequences{$name}{position}{xsteplimit},
+             $sequences{$name}{numframes} );
+    @{$sequences{$name}{position}{yvalues}}=
+      linear($sequences{$name}{position}{ystart},
+             $sequences{$name}{position}{yend},
+             $sequences{$name}{position}{ystep},
+             $sequences{$name}{position}{ystepinc},
+             $sequences{$name}{position}{ysteplimit},
+             $sequences{$name}{numframes});
+
+    # compute the size values array
+    @{$sequences{$name}{size}{xvalues}}=
+      linear($sequences{$name}{size}{xstart},
+             $sequences{$name}{size}{xend},
+             $sequences{$name}{size}{xstep},
+             $sequences{$name}{size}{xstepinc},
+             $sequences{$name}{size}{xsteplimit},
+             $sequences{$name}{numframes});
+    @{$sequences{$name}{size}{yvalues}}=
+      linear($sequences{$name}{size}{ystart},
+             $sequences{$name}{size}{yend},
+             $sequences{$name}{size}{ystep},
+             $sequences{$name}{size}{xstepinc},
+             $sequences{$name}{size}{xsteplimit},
+             $sequences{$name}{numframes});
+
+    # compute the rotation values array
+    @{$sequences{$name}{rotation}{values}}=
+      linear($sequences{$name}{rotation}{start},
+             $sequences{$name}{rotation}{end},
+             $sequences{$name}{rotation}{step},
+             $sequences{$name}{rotation}{stepinc},
+             $sequences{$name}{rotation}{steplimit},
+             $sequences{$name}{numframes});
+
+    # compute the opacity values array
+    @{$sequences{$name}{opacity}{values}}=
+      linear($sequences{$name}{opacity}{start},
+             $sequences{$name}{opacity}{end},
+             $sequences{$name}{opacity}{step},
+             $sequences{$name}{opacity}{stepinc},
+             $sequences{$name}{opacity}{steplimit},
+             $sequences{$name}{numframes});
+
+    # compute the zoom values array
+    @{$sequences{$name}{zoom}{values}}=
+      linear($sequences{$name}{zoom}{start},
+             $sequences{$name}{zoom}{end},
+             $sequences{$name}{zoom}{step},
+             $sequences{$name}{zoom}{stepinc},
+             $sequences{$name}{zoom}{steplimit},
+             $sequences{$name}{numframes});
+  }
+
+  print "\n";
+}
+
+
+###########################################################################
+# processes the sequences
+
+sub generateSequences
+{
+  print "generating sequences\n";
+
+  foreach $name (@sequences)
+  {
+    $tgtframenum=$sequences{$name}{target}{start};
+    $srcframenum=$sequences{$name}{source}{init};
+    $srcindex=0;
+    $srcstep=$sequences{$name}{source}{step};
+    while ( $tgtframenum <= $sequences{$name}{target}{end} )
+    {
+      # this is the 0-padded target frame number
+      $ptgtframenum=sprintf("%06d",$tgtframenum);
+
+      # file name variables
+      $baseframe="$video{dir}/$video{name}-frame:$ptgtframenum-base.pnm";
+      $srcdir=$sequences{$name}{source}{dir};
+      $srcframe="$srcdir/$sequences{$name}{files}[int($srcframenum)]";
+      $workframe1="$video{dir}/$video{name}-seq:$name-frame:$ptgtframenum-1";
+      $workframe2="$video{dir}/$video{name}-seq:$name-frame:$ptgtframenum-2";
+
+      # component variables
+      $xsize=${$sequences{$name}{size}{xvalues}}[$srcindex];
+      $ysize=${$sequences{$name}{size}{yvalues}}[$srcindex];
+      $rotation=${$sequences{$name}{rotation}{values}}[$srcindex];
+      $zoom=${$sequences{$name}{zoom}{values}}[$srcindex];
+      $opacity=${$sequences{$name}{opacity}{values}}[$srcindex];
+      $xpos=${$sequences{$name}{position}{xvalues}}[$srcindex];
+      $ypos=${$sequences{$name}{position}{yvalues}}[$srcindex];
+      $ypos="+$ypos" if ( $ypos =~ /^[0-9]/ );
+
+      # to keep convert happy
+      $xpos="+$xpos" if ($xpos > -1);
+
+      # generate the base frame, if this is the first command
+      if ( $#{$frames{$tgtframenum}} < 0 )
+      {
+        push @{$frames{$tgtframenum}},
+          "ppmmake $video{color} $video{xsize} $video{ysize} > $baseframe"
+      }
+
+
+      if ( $sequences{$name}{noconvert} )
+      {
+        push @{$frames{$tgtframenum}},
+          "cp $srcframe $workframe1";
+      }
+      else
+      {
+        push @{$frames{$tgtframenum}},
+          "convert $srcframe -background black -gravity center -scale ${zoom}%x${zoom}%+0+0 -crop ${xsize}x${ysize}+0+0 -rotate $rotation $workframe1";
+      }
+      push @{$frames{$tgtframenum}},
+        #"composite -background black -compose atop -gravity center -geometry ${xpos}${ypos} $workframe1 -dissolve $opacity $baseframe $workframe2";
+        "ppmcolormask black $workframe1 | composite -background black -compose atop -gravity center -geometry ${xpos}${ypos} $workframe1 -dissolve $opacity $baseframe - $workframe2";
+
+      # move the composited image back into the base frame
+      push @{$frames{$tgtframenum}},
+        "mv $workframe2 $baseframe";
+
+      # clean up
+      push @{$frames{$tgtframenum}},
+        "rm -f $workframe1-mask $workframe1 $workframe2";
+
+      $tgtframenum+=$sequences{$name}{target}{step};
+      $srcindex++;
+      $srcframenum+=$srcstep;
+      $srcframenum =$sequences{$name}{source}{start}
+        if ( int($srcframenum) > $sequences{$name}{source}{end} );
+
+      $srcstep+=$sequences{$name}{source}{stepinc};
+      if ( defined($sequences{$name}{source}{steplimit}) )
+      {
+        if ( $sequences{$name}{source}{step} <=
+               $sequences{$name}{source}{steplimit}
+             &&
+             $srcstep > $sequences{$name}{source}{steplimit})
+        { $srcstep=$sequences{$name}{source}{steplimit}; }
+
+        if ( $sequences{$name}{source}{step} >
+               $sequences{$name}{source}{steplimit}
+             &&
+             $srcstep < $sequences{$name}{source}{steplimit})
+        { $srcstep=$sequences{$name}{source}{steplimit}; }
+      }
+    }
+  }
+
+  print "\n";
+}
+
+
+###########################################################################
+# this routine does a first pass evaluation of the %variables structure
+
+sub checkVariables
+{
+  print "checking variables\n";
+
+  foreach $i (0..$#{$video{variable}})
+  {
+    # check that the variable has a valid name
+    die "  no name defined for variable\n"
+      if ( ! defined($video{variable}[$i]{name}) );
+
+    # check whether the variable has a valid value
+    die "  no value defined for variable $video{variable}[$i]{name}\n"
+      if ( ! defined($video{variable}[$i]{value}) );
+
+    # check whether the variable name is duplicated
+    die "  variable initialized twice: \$$video{variable}[$i]{name}\n"
+      if ( defined(${$video{variable}[$i]{name}}) );
+
+    # store the variable
+    print "  \$$video{variable}[$i]{name}=$video{variable}[$i]{value}\n";
+    $val=varSub($video{variable}[$i]{value});
+    eval "\$$video{variable}[$i]{name}=\"$val\"";
+  }
+
+  print "\n";
+}
+  
+
+###########################################################################
+# this routine does a first pass check of the %video structure
+
+sub checkVideo
+{
+  print "checking video\n";
+
+  # check that we at least have a name
+  die "  no name defined for video\n"
+    if ( ! defined($video{name}) );
+
+  # check the rest of the video attributes
+  die "  no dir defined for video $video{name}\n"
+    if ( ! defined($video{dir}) );
+  die "  can't locate directory $video{dir} for video $video{name}\n"
+    if ( ! -d $video{dir} );
+  die "  no size defined for video $video{name}\n"
+    if ( ! defined($video{size}) );
+  die "  badly formatted size for video $video{name}\n"
+    if ( $video{size} !~ /\d+x\d/ );
+  die "  no color defined for video $video{name}\n"
+    if ( ! defined($video{color}) );
+
+  # check for invalid video tags
+  foreach $key ( keys %video )
+  {
+    $match=0;
+    foreach $valid ( "name","dir","size","color","sequence","variable" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in video: $key\n"; }
+  }
+
+  ($video{xsize},$video{ysize}) = split 'x',$video{size};
+
+  print "\n";
+}
+
+
+###########################################################################
+# This routine processes the data out of the %video structure into the 
+# working structures
+
+sub checkSequences
+{
+  print "checking sequences\n";
+
+  # this reformats the array of sequences from %video into a named hash
+  # of sequences in %sequences
+  foreach $sequence (@{$video{sequence}})
+  {
+    # mung $sequence back into a hash
+    %seqtemp=%{$sequence};
+
+    # check that the sequence has a valid name
+    die "    no name defined for sequence\n"
+      if ( ! defined($seqtemp{name}) );
+
+    # check whether the sequence name is duplicated
+    die "duplicate sequence: $seqtemp{name}\n"
+      if ( defined($sequences{$seqtemp{name}}) );
+
+    # put the sequence into the sequence hash 
+    %{$sequences{$seqtemp{name}}}=%seqtemp;
+
+    # put the sequence name into the sequence array, to preserve order
+    push @sequences,$seqtemp{name};
+  }
+
+  # step through the sequence hash and check each sequence
+  foreach $name (@sequences)
+  {
+    print "  checking $name\n";
+    checkSequence($name);
+  }
+
+  print "\n";
+}
+
+
+###########################################################################
+# This routine checks the sequence is valid: it expects a single argument
+# corresponding to the name of the sequence to check
+
+sub checkSequence
+{
+  local($name)=$_[0];
+
+  # check we have a target and source for this sequence
+  die "  no target defined for sequence $name\n"
+    if ( ! defined($sequences{$name}{target}) );
+  die "  no source defined for sequence $name\n"
+    if ( ! defined($sequences{$name}{source}) );
+
+
+  checkSource($name);
+  checkTarget($name);
+  checkPosition($name);
+  checkRotation($name);
+  checkSize($name);
+  checkZoom($name);
+  checkOpacity($name);
+}
+
+
+###########################################################################
+# this routine checks the name sequence source xml
+
+sub checkSource
+{
+  # parse the args
+  local($name)=$_[0];
+
+  # check source->dir
+  die "  $name->source->dir undefined\n"
+    if ( ! defined($sequences{$name}{source}{dir}) );
+  $sequences{$name}{source}{dir} =
+    varSub($sequences{$name}{source}{dir});
+  die "  $name->source->dir ($sequences{$name}{source}{dir}) must exist\n"
+    if ( ! -d $sequences{$name}{source}{dir} );
+
+  # check source->template 
+  die "  $name->source->template must exist\n"
+    if ( ! defined($sequences{$name}{source}{template}) );
+  $sequences{$name}{source}{template} =
+    varSub($sequences{$name}{source}{template});
+
+  # check source->start
+  if ( defined($sequences{$name}{source}{start}) )
+  {
+    $sequences{$name}{source}{start} =
+      varSub($sequences{$name}{source}{start});
+
+    die "  $name->source->start must be numerical\n"
+      if ( $sequences{$name}{source}{start} !~ /^\d+$/ );
+  }
+  else
+  {
+    $sequences{$name}{source}{start}=0;
+  }
+
+  # check source->init
+  if ( defined($sequences{$name}{source}{init}) )
+  {
+    $sequences{$name}{source}{init} =
+      varSub($sequences{$name}{source}{init});
+    die "  $name->source->init must be numerical\n"
+      if ( $sequences{$name}{source}{init} !~ /^\d+$/ );
+  }
+  else
+  {
+    $sequences{$name}{source}{init}=$sequences{$name}{source}{start};
+  }
+
+  # check source->end
+  if ( defined ($sequences{$name}{source}{end}) )
+  {
+    $sequences{$name}{source}{end} =
+      varSub($sequences{$name}{source}{end});
+
+    die "  $name->source->end undefined\n"
+      if ( ! defined($sequences{$name}{source}{end}) );
+    die "  $name->source->end must be numerical\n"
+      if ( $sequences{$name}{source}{end} !~ /^\d+$/ );
+    die "  $name->source->end must be greater than start\n"
+      if ( $sequences{$name}{source}{end} < $sequences{$name}{source}{start} );
+    die "  $name->source->end must be greater than init\n"
+      if ( $sequences{$name}{source}{end} < $sequences{$name}{source}{init} );
+  }
+
+  # check source->step
+  if ( defined($sequences{$name}{source}{step}) )
+  {
+    $sequences{$name}{source}{step} = 
+      varSub($sequences{$name}{source}{step});
+
+    die "  $name->source->step must be numerical\n"
+      if ( defined($sequences{$name}{source}{step}) &&
+           $sequences{$name}{source}{step} !~ /^\d?\.?\d+$/);
+  }
+  else
+  {
+    $sequences{$name}{source}{step}=1
+      if ( !defined($sequences{$name}{source}{step}) );
+  }
+
+  # check source->stepinc
+  if ( defined($sequences{$name}{source}{stepinc}) )
+  {
+    $sequences{$name}{source}{stepinc} = 
+      varSub($sequences{$name}{source}{stepinc});
+
+    die "  $name->source->stepinc must be numerical\n"
+      if ( defined($sequences{$name}{source}{stepinc}) &&
+           $sequences{$name}{source}{stepinc} !~ /^-?\d?\.?\d+$/);
+  }
+  else
+  {
+    $sequences{$name}{source}{stepinc}=0
+      if ( !defined($sequences{$name}{source}{stepinc}) );
+  }
+
+  # check source->steplimit
+  if ( defined($sequences{$name}{source}{steplimit}) )
+  {
+    $sequences{$name}{source}{steplimit} = 
+      varSub($sequences{$name}{source}{steplimit});
+
+    die "  $name->source->steplimit must be numerical\n"
+      if ( defined($sequences{$name}{source}{steplimit}) &&
+           $sequences{$name}{source}{steplimit} !~ /^-?\d?\.?\d+$/);
+  }
+
+  # check for invalid source tags
+  foreach $key ( keys %{$sequences{$name}{source}} )
+  {
+    $match=0;
+    foreach $valid ( "dir","template","start","end","step","init","stepinc","steplimit" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in $name->source: $key\n"; }
+  }
+}
+
+
+###########################################################################
+# this routine checks the name sequence target xml
+
+sub checkTarget
+{
+  local($name)=$_[0];
+
+  # check target->start
+  die "  $name->target->start undefined\n"
+    if ( ! defined($sequences{$name}{target}{start}) );
+  $sequences{$name}{target}{start} =
+    varSub($sequences{$name}{target}{start});
+  die "  $name->target->start must be numerical\n"
+    if ( $sequences{$name}{target}{start} !~ /^\d+$/ );
+
+  
+  # check target->end and target->length
+  die "  only $name->target->end or $name->target->length can be defined\n"
+    if ( defined($sequences{$name}{target}{end}) &&
+         defined($sequences{$name}{target}{length}) );
+
+  if ( defined($sequences{$name}{target}{end}) )
+  {
+    $sequences{$name}{target}{end} =
+      varSub($sequences{$name}{target}{end});
+    die "  $name->target->end must be numerical\n"
+      if ( $sequences{$name}{target}{end} !~ /^\d+$/ );
+    die "  $name->target->end must be greater than start\n"
+      if ( $sequences{$name}{target}{end} < $sequences{$name}{target}{start} );
+  }
+  elsif ( defined($sequences{$name}{target}{length}) )
+  {
+    $sequences{$name}{target}{length} =
+      varSub($sequences{$name}{target}{length});
+    die "  $name->target->end must be numerical\n"
+      if ( $sequences{$name}{target}{length} !~ /^\d+$/ );
+    die "  $name->target->length must be greater than 1\n"
+      if ( $sequences{$name}{target}{length} < 2 );
+
+    $sequences{$name}{target}{end} =
+      $sequences{$name}{target}{start} + $sequences{$name}{target}{length} - 1;
+  }
+  else
+  {
+    die "  $name->target->end or $name->target->length must be defined\n"
+  }
+
+  # check the step tag is valid, if present
+  if ( defined($sequences{$name}{target}{step}) )
+  {
+    $sequences{$name}{target}{step} =
+      varSub($sequences{$name}{target}{step});
+
+    die "  $name->target->step must be numerical\n"
+      if ( defined($sequences{$name}{target}{step}) &&
+           $sequences{$name}{target}{step} !~ /^\d+$/);
+  }
+  else
+  {
+    $sequences{$name}{target}{step}=1;
+  }
+
+  # check for invalid target tags
+  foreach $key ( keys %{$sequences{$name}{target}} )
+  {
+    $match=0;
+    foreach $valid ( "start","end","step","length" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in $name->target: $key\n"; }
+  }
+}
+
+
+###########################################################################
+# this routine checks the position xml for the named sequence
+
+sub checkPosition
+{
+  local($name)=$_[0];
+
+  # check that the position, if defined, is valid
+  if ( defined($sequences{$name}{position}) )
+  {
+    # check that there is a start value
+    die "$name->position->start undefined\n"
+      if ( ! defined($sequences{$name}{position}{start}) );
+    $sequences{$name}{position}{start} =
+      varSub($sequences{$name}{position}{start});
+    die "$name->position->start badly formatted\n"
+      if ( $sequences{$name}{position}{start} !~ /^-?\d+x-?\d+$/ );
+
+    # if there is an end value, check it is correctly formatted
+    if ( defined($sequences{$name}{position}{end}) )
+    {
+      $sequences{$name}{position}{end} =
+        varSub($sequences{$name}{position}{end});
+      die "$name->position->end badly formatted\n"
+        if ( $sequences{$name}{position}{end} !~ /^-?\d+x-?\d+$/ );
+    }
+
+    # if there is an xstep value, check it is correctly formatted
+    if ( defined($sequences{$name}{position}{xstep}) )
+    {
+      $sequences{$name}{position}{xstep} =
+        varSub($sequences{$name}{position}{xstep});
+      die "$name->position->xstep badly formatted\n"
+        if ( $sequences{$name}{position}{xstep} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is a ystep value, check it is correctly formatted
+    if ( defined($sequences{$name}{position}{ystep}) )
+    {
+      $sequences{$name}{position}{ystep} =
+        varSub($sequences{$name}{position}{ystep});
+      die "$name->position->ystep badly formatted\n"
+        if ( $sequences{$name}{position}{ystep} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is an xstepinc value, check it is correctly formatted
+    if ( defined($sequences{$name}{position}{xstepinc}) )
+    {
+      $sequences{$name}{position}{xstepinc} =
+        varSub($sequences{$name}{position}{xstepinc});
+      die "$name->position->xstepinc badly formatted\n"
+        if ( $sequences{$name}{position}{xstepinc} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is a ystepinc value, check it is correctly formatted
+    if ( defined($sequences{$name}{position}{ystepinc}) )
+    {
+      $sequences{$name}{position}{ystepinc} =
+        varSub($sequences{$name}{position}{ystepinc});
+      die "$name->position->ystepinc badly formatted\n"
+        if ( $sequences{$name}{position}{ystepinc} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is an xsteplimit value, check it is correctly formatted
+    if ( defined($sequences{$name}{position}{xsteplimit}) )
+    {
+      $sequences{$name}{position}{xsteplimit} =
+        varSub($sequences{$name}{position}{xsteplimit});
+      die "$name->position->xsteplimit badly formatted\n"
+        if ( $sequences{$name}{position}{xsteplimit} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is a ysteplimit value, check it is correctly formatted
+    if ( defined($sequences{$name}{position}{ysteplimit}) )
+    {
+      $sequences{$name}{position}{ysteplimit} =
+        varSub($sequences{$name}{position}{ysteplimit});
+      die "$name->position->ysteplimit badly formatted\n"
+        if ( $sequences{$name}{position}{ysteplimit} !~ /^\d?\.?\d+$/ );
+    }
+  }
+  else
+  {
+    # set the default start position
+    $sequences{$name}{position}{start}="0x0";
+  }
+
+  # set the default values
+  $sequences{$name}{position}{end}=$sequences{$name}{position}{start}
+    if ( !defined($sequences{$name}{position}{end}) );
+
+  # process the position values
+  ($sequences{$name}{position}{xstart},$sequences{$name}{position}{ystart}) =
+    split 'x',$sequences{$name}{position}{start};
+  ($sequences{$name}{position}{xend},$sequences{$name}{position}{yend}) =
+    split 'x',$sequences{$name}{position}{end};
+
+  # check for invalid position tags
+  foreach $key ( keys %{$sequences{$name}{position}} )
+  {
+    $match=0;
+    foreach $valid ( "start","end","ystart","yend","xstart","xend","xstep","ystep","xstepinc","ystepinc","xsteplimit","ysteplimit" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in $name->position: $key\n"; }
+  }
+}
+
+
+###########################################################################
+# this routine checks the rotation xml for the named sequence
+
+sub checkRotation
+{
+  local($name)=$_[0];
+
+  # check that the rotation, if defined, is valid
+  if ( defined($sequences{$name}{rotation}) )
+  {
+    # check that there is a start value
+    die "$name->rotation->start undefined\n"
+      if ( ! defined($sequences{$name}{rotation}{start}) );
+    $sequences{$name}{rotation}{start} =
+      varSub($sequences{$name}{rotation}{start});
+    die "$name->rotation->start badly formatted\n"
+      if ( $sequences{$name}{rotation}{start} !~ /^-?\d+$/ );
+
+    # if there is an end value, check it is correctly formatted
+    if ( defined($sequences{$name}{rotation}{end}) )
+    {
+      $sequences{$name}{rotation}{end} =
+        varSub($sequences{$name}{rotation}{end});
+      die "$name->rotation->end badly formatted\n"
+        if ( $sequences{$name}{rotation}{end} !~ /^-?\d+$/ );
+    }
+
+    # if there is a step value, check it is correctly formatted
+    if ( defined($sequences{$name}{rotation}{step}) )
+    {
+      $sequences{$name}{rotation}{step} =
+        varSub($sequences{$name}{rotation}{step});
+      die "$name->rotation->step badly formatted\n"
+        if ( $sequences{$name}{rotation}{step} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is a stepinc value, check it is correctly formatted
+    if ( defined($sequences{$name}{rotation}{stepinc}) )
+    {
+      $sequences{$name}{rotation}{stepinc} =
+        varSub($sequences{$name}{rotation}{stepinc});
+      die "$name->rotation->stepinc badly formatted\n"
+        if ( $sequences{$name}{rotation}{stepinc} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is an steplimit value, check it is correctly formatted
+    if ( defined($sequences{$name}{rotation}{steplimit}) )
+    {
+      $sequences{$name}{size}{steplimit} =
+        varSub($sequences{$name}{rotation}{steplimit});
+      die "$name->rotation->steplimit badly formatted\n"
+        if ( $sequences{$name}{rotation}{steplimit} !~ /^\d?\.?\d+$/ );
+    }
+  }
+  else
+  {
+    # set the default start position
+    $sequences{$name}{rotation}{start}="0";
+  }
+
+  # set the default end rotation
+  $sequences{$name}{rotation}{end}=$sequences{$name}{rotation}{start}
+    if ( !defined($sequences{$name}{rotation}{end}) );
+
+  # check for invalid rotation tags
+  foreach $key ( keys %{$sequences{$name}{rotation}} )
+  {
+    $match=0;
+    foreach $valid ( "start","end","step" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in $name->rotation: $key\n"; }
+  }
+}
+
+
+###########################################################################
+# this routine checks the opacity xml for the named sequence
+
+sub checkOpacity
+{
+  local($name)=$_[0];
+
+  # check that the opacity, if defined, is valid
+  if ( defined($sequences{$name}{opacity}) )
+  {
+    # check that there is a start value
+    die "$name->opacity->start undefined\n"
+      if ( ! defined($sequences{$name}{opacity}{start}) );
+    $sequences{$name}{opacity}{start} =
+      varSub($sequences{$name}{opacity}{start});
+    die "$name->opacity->start badly formatted\n"
+      if ( $sequences{$name}{opacity}{start} !~ /^\d+$/ ||
+           $sequences{$name}{opacity}{start} > 100    ||
+           $sequences{$name}{opacity}{start} < 0      );
+
+    # if there is an end value, check it is correctly formatted
+    if ( defined($sequences{$name}{opacity}{end}) )
+    {
+      $sequences{$name}{opacity}{end} =
+        varSub($sequences{$name}{opacity}{end});
+      die "$name->opacity->end badly formatted\n"
+        if ( $sequences{$name}{opacity}{end} !~ /^\d+$/ ||
+             $sequences{$name}{opacity}{end} > 100    ||
+             $sequences{$name}{opacity}{end} < 0      );
+    }
+
+    # if there is a step value, check it is correctly formatted
+    if ( defined($sequences{$name}{opacity}{step}) )
+    {
+      $sequences{$name}{opacity}{step} =
+        varSub($sequences{$name}{opacity}{step});
+      die "$name->opacity->step badly formatted\n"
+        if ( $sequences{$name}{opacity}{step} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is a stepinc value, check it is correctly formatted
+    if ( defined($sequences{$name}{opacity}{stepinc}) )
+    {
+      $sequences{$name}{opacity}{stepinc} =
+        varSub($sequences{$name}{opacity}{stepinc});
+      die "$name->opacity->stepinc badly formatted\n"
+        if ( $sequences{$name}{opacity}{stepinc} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is an steplimit value, check it is correctly formatted
+    if ( defined($sequences{$name}{opacity}{steplimit}) )
+    {
+      $sequences{$name}{opacity}{steplimit} =
+        varSub($sequences{$name}{opacity}{steplimit});
+      die "$name->opacity->steplimit badly formatted\n"
+        if ( $sequences{$name}{opacity}{steplimit} !~ /^\d?\.?\d+$/ );
+    }
+  }
+  else
+  {
+    # set the default start position
+    $sequences{$name}{opacity}{start}="100";
+  }
+
+  # set the default end opacity
+  $sequences{$name}{opacity}{end}=$sequences{$name}{opacity}{start}
+    if ( !defined($sequences{$name}{opacity}{end}) );
+
+  # check for invalid opacity tags
+  foreach $key ( keys %{$sequences{$name}{opacity}} )
+  {
+    $match=0;
+    foreach $valid ( "start","end","step" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in $name->opacity: $key\n"; }
+  }
+}
+
+
+###########################################################################
+# this routine checks the zoom xml for the named sequence
+
+sub checkZoom
+{
+  local($name)=$_[0];
+
+  # check that the zoom, if defined, is valid
+  if ( defined($sequences{$name}{zoom}) )
+  {
+    # check that there is a start value
+    die "$name->zoom->start undefined\n"
+      if ( ! defined($sequences{$name}{zoom}{start}) );
+    $sequences{$name}{zoom}{start} =
+      varSub($sequences{$name}{zoom}{start});
+    die "$name->zoom->start badly formatted\n"
+      if ( $sequences{$name}{zoom}{start} !~ /^\d+$/ ||
+           $sequences{$name}{zoom}{start} < 0      );
+
+    # if there is an end value, check it is correctly formatted
+    if ( defined($sequences{$name}{zoom}{end}) )
+    {
+      $sequences{$name}{zoom}{end} =
+        varSub($sequences{$name}{zoom}{end});
+      die "$name->zoom->end badly formatted\n"
+        if ( $sequences{$name}{zoom}{end} !~ /\d+/ ||
+             $sequences{$name}{zoom}{end} < 1      );
+    }
+
+    # if there is a step value, check it is correctly formatted
+    if ( defined($sequences{$name}{zoom}{step}) )
+    {
+      $sequences{$name}{zoom}{step} =
+        varSub($sequences{$name}{zoom}{step});
+      die "$name->zoom->step badly formatted\n"
+        if ( $sequences{$name}{zoom}{step} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is a stepinc value, check it is correctly formatted
+    if ( defined($sequences{$name}{zoom}{stepinc}) )
+    {
+      $sequences{$name}{zoom}{stepinc} =
+        varSub($sequences{$name}{zoom}{stepinc});
+      die "$name->zoom->stepinc badly formatted\n"
+        if ( $sequences{$name}{zoom}{stepinc} !~ /^\d?\.?\d+$/ );
+    }
+
+    # if there is an steplimit value, check it is correctly formatted
+    if ( defined($sequences{$name}{zoom}{steplimit}) )
+    {
+      $sequences{$name}{zoom}{steplimit} =
+        varSub($sequences{$name}{zoom}{steplimit});
+      die "$name->zoom->steplimit badly formatted\n"
+        if ( $sequences{$name}{zoom}{steplimit} !~ /^\d?\.?\d+$/ );
+    }
+  }
+  else
+  {
+    # set the default zoom
+    $sequences{$name}{zoom}{start}="100";
+  }
+
+  # set the default end zoom
+  $sequences{$name}{zoom}{end}=$sequences{$name}{zoom}{start}
+    if ( !defined($sequences{$name}{zoom}{end}) );
+
+  # check for invalid zoom tags
+  foreach $key ( keys %{$sequences{$name}{zoom}} )
+  {
+    $match=0;
+    foreach $valid ( "start","end","step","stepinc","steplimit" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in $name->zoom: $key\n"; }
+  }
+}
+
+
+###########################################################################
+# this routine checks the size xml for the named sequence
+
+sub checkSize
+{
+  local($name)=$_[0];
+
+  # check size->start
+  die "$name->size->start undefined\n"
+    if ( ! defined($sequences{$name}{size}{start}) );
+  $sequences{$name}{size}{start} =
+    varSub($sequences{$name}{size}{start});
+  die "$name->size->start badly formatted\n"
+    if ( $sequences{$name}{size}{start} !~ /^\d+x\d+$/ );
+
+  # check size->end
+  if ( defined($sequences{$name}{size}{end}) )
+  {
+    $sequences{$name}{size}{end} =
+      varSub($sequences{$name}{size}{end});
+    die "$name->size->end badly formatted\n"
+      if ( $sequences{$name}{size}{end} !~ /^\d+x\d+$/ );
+  }
+  else
+  {
+    $sequences{$name}{size}{end} = $sequences{$name}{size}{start};
+  }
+
+  # if there is an xstep, check it is formatted correctly
+  if ( defined($sequences{$name}{size}{xstep}) )
+  {
+    $sequences{$name}{size}{xstep} =
+      varSub($sequences{$name}{size}{xstep});
+    die "$name->size->xstep badly formatted\n"
+      if ( $sequences{$name}{size}{xstep} !~ /^\d?\.?\d+$/ );
+  }
+
+  # if there is an ystep, check it is formatted correctly
+  if ( defined($sequences{$name}{size}{ystep}) )
+  {
+    $sequences{$name}{size}{ystep} =
+      varSub($sequences{$name}{size}{ystep});
+    die "$name->size->ystep badly formatted\n"
+      if ( $sequences{$name}{size}{ystep} !~ /^\d?\.?\d+$/ );
+  }
+
+  # if there is an xstepinc value, check it is correctly formatted
+  if ( defined($sequences{$name}{size}{xstepinc}) )
+  {
+    $sequences{$name}{size}{xstepinc} =
+      varSub($sequences{$name}{size}{xstepinc});
+    die "$name->size->xstep badly formatted\n"
+      if ( $sequences{$name}{size}{xstepinc} !~ /^\d?\.?\d+$/ );
+  }
+
+  # if there is a ystepinc value, check it is correctly formatted
+  if ( defined($sequences{$name}{size}{ystepinc}) )
+  {
+    $sequences{$name}{size}{ystepinc} =
+      varSub($sequences{$name}{size}{ystepinc});
+    die "$name->size->ystep badly formatted\n"
+      if ( $sequences{$name}{size}{ystepinc} !~ /^\d?\.?\d+$/ );
+  }
+
+  # if there is an xsteplimit value, check it is correctly formatted
+  if ( defined($sequences{$name}{size}{xsteplimit}) )
+  {
+    $sequences{$name}{size}{xsteplimit} =
+      varSub($sequences{$name}{size}{xsteplimit});
+    die "$name->size->xsteplimit badly formatted\n"
+      if ( $sequences{$name}{size}{xsteplimit} !~ /^\d?\.?\d+$/ );
+  }
+
+  # if there is a ysteplimit value, check it is correctly formatted
+  if ( defined($sequences{$name}{size}{ysteplimit}) )
+  {
+    $sequences{$name}{size}{ysteplimit} =
+      varSub($sequences{$name}{size}{ysteplimit});
+    die "$name->size->ysteplimit badly formatted\n"
+      if ( $sequences{$name}{size}{ysteplimit} !~ /^\d?\.?\d+$/ );
+  }
+
+  # process the size values
+  ($sequences{$name}{size}{xstart},$sequences{$name}{size}{ystart}) =
+    split 'x',$sequences{$name}{size}{start};
+  ($sequences{$name}{size}{xend},$sequences{$name}{size}{yend}) =
+    split 'x',$sequences{$name}{size}{end};
+
+  # check for invalid size tags
+  foreach $key ( keys %{$sequences{$name}{size}} )
+  {
+    $match=0;
+    foreach $valid ( "start","end","xstart","xend","ystart","yend","xstep","ystep","xstepinc","ystepinc","xsteplimit","ysteplimit" )
+    {
+      $match=1 if ( $key eq $valid );
+    }
+
+    if ( ! $match )
+    { die "  bad tag in $name->size: $key\n"; }
+  }
+}
+
+
+###########################################################################
+# This routine uses the sequence global variable to return an array of the
+# files matching its source attribute
+
+sub fileList
+{
+  local($dir,$template)=($_[0],$_[1]);
+  local(@files);
+
+  die "can't find directory $dir\n"
+    if ( ! -d $dir );
+
+  # open the directory and read the files 
+  opendir DIR,$dir || die "error opening $dir: $!\n";
+  @files=sort grep /$template/,readdir(DIR);
+  closedir(DIR);
+
+  return(@files);
+}
+
+
+###########################################################################
+# this routine prints the values of all sequences
+
+sub printSequences()
+{
+  foreach $name (@sequences)
+  {
+    printSequence($name);
+  }
+}
+
+
+###########################################################################
+# this routine prints the values of a sequence
+
+sub printSequence
+{
+  local($name)=$_[0];
+
+  print "\n";
+  print "sequence $name\n";
+  print "  numframes: $sequences{$name}{numframes}\n"; 
+
+  print "  source:\n";
+  print "    dir: $sequences{$name}{source}{dir}\n"; 
+  print "    template: $sequences{$name}{source}{template}\n"; 
+  print "    start: $sequences{$name}{source}{start}\n"; 
+  print "    end: $sequences{$name}{source}{end}\n"; 
+  print "    step: $sequences{$name}{source}{step}\n"; 
+  print "    stepinc: $sequences{$name}{source}{stepinc}\n"; 
+  print "    steplimit: $sequences{$name}{source}{steplimit}\n"; 
+
+  print "  files:\n";
+  foreach ( $i=0; $i<=$#{$sequences{$name}{files}}; $i++)
+  { print "        $i: $sequences{$name}{files}[$i]\n"; }
+
+  print "  target\n";
+  print "    start: $sequences{$name}{target}{start}\n"; 
+  print "    step: $sequences{$name}{target}{step}\n"; 
+  print "    stepinc: $sequences{$name}{target}{stepinc}\n"; 
+  print "    steplimit: $sequences{$name}{target}{steplimit}\n"; 
+
+  print "  rotation\n";
+  print "    start: $sequences{$name}{rotation}{start}\n"; 
+  print "    end: $sequences{$name}{rotation}{end}\n"; 
+  print "    step: $sequences{$name}{rotation}{step}\n"; 
+  print "    stepinc: $sequences{$name}{rotation}{stepinc}\n"; 
+  print "    steplimit: $sequences{$name}{rotation}{steplimit}\n"; 
+  print "    values:\n";
+  foreach ( $i=0; $i<$sequences{$name}{numframes}; $i++)
+  { print "        $i: ${@{$sequences{$name}{rotation}{values}}}[$i]\n"; }
+
+  print "  opacity\n";
+  print "    start: $sequences{$name}{opacity}{start}\n"; 
+  print "    end: $sequences{$name}{opacity}{end}\n"; 
+  print "    step: $sequences{$name}{opacity}{step}\n"; 
+  print "    stepinc: $sequences{$name}{opacity}{stepinc}\n"; 
+  print "    steplimit: $sequences{$name}{opacity}{steplimit}\n"; 
+  foreach ( $i=0; $i<$sequences{$name}{numframes}; $i++)
+  { print "        $i: ${@{$sequences{$name}{opacity}{values}}}[$i]\n"; }
+
+  print "  zoom\n";
+  print "    start: $sequences{$name}{zoom}{start}\n"; 
+  print "    end: $sequences{$name}{zoom}{end}\n"; 
+  print "    step: $sequences{$name}{zoom}{step}\n"; 
+  print "    stepinc: $sequences{$name}{zoom}{stepinc}\n"; 
+  print "    steplimit: $sequences{$name}{zoom}{steplimit}\n"; 
+  foreach ( $i=0; $i<$sequences{$name}{numframes}; $i++)
+  { print "        $i: ${@{$sequences{$name}{zoom}{values}}}[$i]\n"; }
+
+  print "  size\n";
+  print "    start: $sequences{$name}{size}{xstart} x ";
+  print "$sequences{$name}{size}{ystart}\n"; 
+  print "    end: $sequences{$name}{size}{xend} x ";
+  print "$sequences{$name}{size}{yend}\n"; 
+  print "    xstep: $sequences{$name}{size}{xstep}\n"; 
+  print "    ystep: $sequences{$name}{size}{ystep}\n"; 
+  print "    xstepinc: $sequences{$name}{size}{xstepinc}\n"; 
+  print "    ystepinc: $sequences{$name}{size}{ystepinc}\n"; 
+  print "    xsteplimit: $sequences{$name}{size}{xsteplimit}\n"; 
+  print "    ysteplimit: $sequences{$name}{size}{ysteplimit}\n"; 
+  foreach ( $i=0; $i<$sequences{$name}{numframes}; $i++)
+  {  print "        $i: ${@{$sequences{$name}{size}{xvalues}}}[$i] x ";
+     print "${@{$sequences{$name}{size}{yvalues}}}[$i]\n";
+  }
+
+  print "  position\n";
+  print "    start: $sequences{$name}{position}{xstart} x ";
+  print "$sequences{$name}{position}{ystart}\n"; 
+  print "    end: $sequences{$name}{position}{xend} x ";
+  print "$sequences{$name}{position}{yend}\n"; 
+  print "    xstep: $sequences{$name}{position}{xstep}\n"; 
+  print "    ystep: $sequences{$name}{position}{ystep}\n"; 
+  print "    xstepinc: $sequences{$name}{position}{xstepinc}\n"; 
+  print "    ystepinc: $sequences{$name}{position}{ystepinc}\n"; 
+  print "    xsteplimit: $sequences{$name}{position}{xsteplimit}\n"; 
+  print "    ysteplimit: $sequences{$name}{position}{ysteplimit}\n"; 
+  foreach ( $i=0; $i<$sequences{$name}{numframes}; $i++)
+  {  print "        $i: ${@{$sequences{$name}{position}{xvalues}}}[$i] x ";
+     print "${@{$sequences{$name}{position}{yvalues}}}[$i]\n";
+  }
+}
+
+
+###########################################################################
+# this routine prints the video information
+
+sub printVideo
+{
+  print "\n";
+  print "video $video{name}\n";
+  print "  dir: $video{dir}\n";
+  print "  base: $video{base}\n";
+  print "  size: $video{xsize} x $video{ysize}\n";
+  print "  color: $video{color}\n";
+  print "\n";
+
+  foreach $frame (sort {$a<=>$b} keys %{$video{frames}} )
+  {
+    print "  frame $frame:\n";
+
+    foreach $cmd (@{$video{frames}{$frame}})
+    {
+      print "    $cmd\n";
+    }
+  }
+}
+
+
+###########################################################################
+# this routine prints the video command
+
+sub generateCommands
+{
+  print "generating commands\n";
+
+  open CMD,">$xml.cmd" || die "error opening command file: $!\n";
+  #open CMD,"|cat";
+
+  print CMD "#!/bin/sh\n";
+  print CMD "\n";
+  print CMD "start=`date +%s`\n";
+  print CMD "trap exit 2\n";
+  print CMD "\n";
+
+  foreach $frame (sort {$a<=>$b} keys %frames )
+  {
+    print CMD "\n";
+    print CMD "#######################################################3\n";
+    print CMD "# frame $frame\n";
+    print CMD "echo -e '\\r frame $frame  \\c'\n";
+    print CMD "\n";
+    print CMD "# frame $frame start\n";
+    foreach $cmd (@{$frames{$frame}})
+    {
+      print CMD "$cmd\n";
+    }
+    print CMD "# frame $frame end\n";
+    print CMD "\n";
+    $maxframe=$frame;
+  }
+  print CMD "\n";
+  print CMD "echo\n";
+  print CMD "end=`date +%s`\n";
+  print CMD "dur=`echo \$end \$start - p | dc`\n";
+  print CMD "\n";
+  print CMD "echo generating complete: \$dur seconds\n";
+  print "  $maxframe frames\n";
+
+  print "\n";
+}
+
+
+###########################################################################
+# this routine is called to evaluate a possible variable substitution for
+# a parameter: if the parameter as passed leads with a $, it is expected to
+# be a variable, and that variable must already have been defined
+
+sub varSub
+{
+  local($var)=$_[0];
+  local($return);
+
+  if ( $var =~ /^\$/ )
+  {
+    $return=eval $var;
+    print "  warning: $var evals to \"\": possibly uninitialized\n"
+      if ( $return eq "" );
+    print "    $var evaluates to $return\n";
+    return ($return);
+  }
+  else
+  {
+    return($var);
+  }
+}
+
+
+###########################################################################
+# this routine takes a start, a stop, a step, and a number of frames,
+# and returns an array of linearly interpolated values clamped at the
+# start and stop
+
+sub linear
+{
+  local($start)=$_[0];
+  local($end)=$_[1];
+  local($step)=$_[2];
+  local($stepinc)=$_[3];
+  local($steplimit)=$_[4];
+  local($numframes)=$_[5];
+
+  local($cur,$curstep,$i,@result);
+
+  # compute the step value if it's not defined
+  $step=($end-$start)/($numframes-1) if ( ! defined($step) );
+
+  # compute the position values array
+  $cur=$start;
+  $curstep=$step;
+  for ($i=0 ; $i<$numframes-1 ; $i++ )
+  {
+    push @result,int($cur);
+    $cur=$cur+$curstep;
+
+    # clamp if we've over/under shot
+    $cur=$end if ( ( $start <= $end ) && ( $cur > $end ) );
+    $cur=$end if ( ( $start > $end ) && ( $cur < $end ) );
+
+    # increment and clamp step
+    $curstep+=$stepinc;
+    $curstep=$steplimit
+      if ( ( $step <= $steplimit ) &&
+           defined($steplimit) &&
+           ( $curstep > $steplimit ) );
+    $curstep=$steplimit
+      if ( ( $step > $steplimit ) &&
+           defined($steplimit) &&
+           ( $curstep < $steplimit ) );
+  }
+
+  # snap to end position
+  push @result,$end;
+
+  return @result;
+}

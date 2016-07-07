@@ -1,0 +1,98 @@
+#!/usr/bin/perl
+
+use Socket;
+
+$remote="localhost";
+$port="1234";
+
+$paddr=sockaddr_in($port,inet_aton($remote));
+
+socket(S,PF_INET,SOCK_STREAM,getprotobyname('tcp')) || die "socket: $!";
+setsockopt(S,SOL_SOCKET,SO_REUSEADDR,pack("l",1)) || die "setsockopt: $!";
+bind(S, sockaddr_in($port,INADDR_ANY)) || die "bind: $!";
+listen(S,SOMAXCONN);
+
+while ( 1 )
+{
+  print "\n\nwaiting for connection\n";
+  $paddr=accept(C,S);
+  print "\ngot connection\n";
+  $old=select(C) ; $|=1; select($old);
+
+  # get our working directory
+  print "waiting for directory\n";
+  $cmd=<C>;
+  if ( $cmd !~ /^cd \// )
+  {
+    print "invalid directory command received: $cmd\n";
+    print "closing connection\n";
+    close(C);
+    next;
+  }
+
+  # change into our working directory
+  ($junk,$directory)=split ' ',$cmd;
+  if ( ! -d $directory )
+  {
+    print "$directory isn't a directory\n";
+    print "closing connection\n";
+    close(C);
+    next;
+  }
+  print "received directory: $directory\n";
+  chdir $directory;
+
+  # let the server know that we're ready to rock
+  print C "ready\n";
+
+  # while we're still talking to the server, loop processing commands
+  print "\n";
+  $connected=1;
+  $frame=0; $batch=0; 
+  $start=time();
+  while ( $connected )
+  {
+    $cmd=<C>;
+
+    $connected=0 if ( length($cmd) == 0 );
+
+    if ( $cmd =~ /^go$/ )
+    {
+      $batch++;
+      print "\r $batch frames";
+      $dur=time()-$start;
+      if ( $dur > 0 )
+      {
+        $fps=sprintf("%.2f",$batch / $dur);
+        print ", $fps fps  ";
+      }
+
+      foreach $cmd (@cmds)
+      {
+        if ( $cmd =~ /^status / )
+        {
+          $cmd =~ s/^status //;
+          $cmd =~ s/\n//;
+          print "$cmd\n";
+        }
+        else
+        {
+          `$cmd 1>&2`;
+        }
+      }
+      undef(@cmds);
+      print C "ready\n";
+      next;
+    }
+
+    if ( $cmd =~ /^quit/ )
+    {
+      close(C);
+      exit;
+    }
+
+    push @cmds,$cmd;
+  }
+
+  close(C);
+}
